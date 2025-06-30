@@ -54,30 +54,102 @@ Enter a SMILES string to get comprehensive drug-likeness and ADMET predictions i
 
 def make_api_request(smiles: str) -> Optional[Dict[str, Any]]:
     """
-    Send SMILES to ADMETlab 2.0 API and return the response
+    Send SMILES to ADMETlab 3.0 API and return the response
     """
-    url = "https://admetmesh.scbdd.com/service/predict"
+    # Try ADMETlab 3.0 endpoints
+    api_endpoints = [
+        "https://admetlab3.scbdd.com/api/predict",
+        "https://admetlab3.scbdd.com/service/predict", 
+        "https://admetlab3.scbdd.com/api/prediction",
+        "https://admetmesh.scbdd.com/api/predict"
+    ]
     
     headers = {
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json'
     }
     
     payload = {
         "smiles": smiles
     }
     
+    with st.spinner("🔬 Analyzing molecular properties..."):
+        for i, url in enumerate(api_endpoints):
+            try:
+                st.info(f"Trying endpoint {i+1}/{len(api_endpoints)}: {url}")
+                response = requests.post(url, json=payload, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    st.success(f"✅ Connected to ADMETlab API at: {url}")
+                    return response.json()
+                elif response.status_code == 404:
+                    st.warning(f"❌ Endpoint not found: {url}")
+                    continue
+                else:
+                    st.warning(f"⚠️ API returned status {response.status_code} for: {url}")
+                    continue
+                    
+            except requests.exceptions.RequestException as e:
+                st.warning(f"❌ Connection failed for {url}: {str(e)}")
+                continue
+            except json.JSONDecodeError as e:
+                st.warning(f"❌ Invalid JSON response from {url}: {str(e)}")
+                continue
+    
+    # If all endpoints fail, try the fallback approach
+    st.error("❌ All ADMETlab endpoints failed. Trying alternative approach...")
+    return get_alternative_molecular_data(smiles)
+
+def get_alternative_molecular_data(smiles: str) -> Optional[Dict[str, Any]]:
+    """
+    Fallback function to get basic molecular properties using PubChem API
+    """
     try:
-        with st.spinner("🔬 Analyzing molecular properties..."):
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            response.raise_for_status()
-            return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"API request failed: {str(e)}")
-        return None
-    except json.JSONDecodeError as e:
-        st.error(f"Failed to parse API response: {str(e)}")
-        return None
+        st.info("🔄 Using PubChem API for basic molecular properties...")
+        
+        # Get compound data from PubChem
+        pubchem_url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/{smiles}/property/MolecularWeight,XLogP,HBondDonorCount,HBondAcceptorCount/JSON"
+        
+        response = requests.get(pubchem_url, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if 'PropertyTable' in data and 'Properties' in data['PropertyTable']:
+                props = data['PropertyTable']['Properties'][0]
+                
+                # Convert to our expected format
+                result = {
+                    'molecular_weight': props.get('MolecularWeight'),
+                    'logp': props.get('XLogP'),
+                    'hbd': props.get('HBondDonorCount'), 
+                    'hba': props.get('HBondAcceptorCount'),
+                    'source': 'PubChem API',
+                    'note': 'ADMET properties not available via PubChem'
+                }
+                
+                st.success("✅ Retrieved basic properties from PubChem")
+                return result
+            
+    except Exception as e:
+        st.error(f"PubChem API also failed: {str(e)}")
+    
+    # Last resort: return mock data structure for demo
+    st.warning("⚠️ Using estimated values for demonstration (not real predictions)")
+    return {
+        'molecular_weight': 180.16,  # Example values
+        'logp': 1.19,
+        'hbd': 1,
+        'hba': 4,
+        'source': 'Demo Mode',
+        'note': 'These are example values, not real predictions',
+        'hia': 'Good',
+        'herg': 'Non-blocker', 
+        'ames': 'Negative',
+        'carcinogenicity': 'Non-carcinogenic',
+        'ld50': 2000
+    }
 
 def extract_molecular_properties(data: Dict[str, Any]) -> Dict[str, float]:
     """
@@ -85,12 +157,26 @@ def extract_molecular_properties(data: Dict[str, Any]) -> Dict[str, float]:
     """
     properties = {}
     
-    # Common property mappings (adjust based on actual API response structure)
+    # Handle direct property format (from PubChem or structured API)
+    if 'molecular_weight' in data:
+        properties['molecular_weight'] = data.get('molecular_weight')
+    if 'logp' in data:
+        properties['logp'] = data.get('logp')
+    if 'hbd' in data:
+        properties['hbd'] = data.get('hbd')
+    if 'hba' in data:
+        properties['hba'] = data.get('hba')
+    
+    # If we already have the properties, return them
+    if properties:
+        return properties
+    
+    # Common property mappings for ADMETlab response
     property_mappings = {
-        'molecular_weight': ['MW', 'molecular_weight', 'mol_weight', 'mw'],
-        'logp': ['LogP', 'logp', 'clogp', 'log_p'],
-        'hbd': ['HBD', 'hbd', 'h_bond_donors', 'num_hbd'],
-        'hba': ['HBA', 'hba', 'h_bond_acceptors', 'num_hba']
+        'molecular_weight': ['MW', 'molecular_weight', 'mol_weight', 'mw', 'MolecularWeight'],
+        'logp': ['LogP', 'logp', 'clogp', 'log_p', 'XLogP'],
+        'hbd': ['HBD', 'hbd', 'h_bond_donors', 'num_hbd', 'HBondDonorCount'],
+        'hba': ['HBA', 'hba', 'h_bond_acceptors', 'num_hba', 'HBondAcceptorCount']
     }
     
     # Search through the data structure
@@ -384,6 +470,13 @@ if analyze_button and smiles_input:
     api_response = make_api_request(smiles_input)
     
     if api_response:
+        # Display data source information
+        source = api_response.get('source', 'ADMETlab API')
+        if 'note' in api_response:
+            st.info(f"📊 **Data Source:** {source} - {api_response['note']}")
+        else:
+            st.success(f"📊 **Data Source:** {source}")
+        
         # Show raw API response in expandable section
         with st.expander("📋 Raw API Response", expanded=False):
             st.json(api_response)
@@ -452,9 +545,16 @@ elif analyze_button:
 # Footer
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
-**About ADMETlab 2.0**
+**About this App**
 
-This app uses the ADMETlab 2.0 API to predict molecular properties and ADMET characteristics. Results are for research purposes only.
+This app tries multiple ADMETlab API endpoints:
+1. ADMETlab 3.0 (primary)
+2. PubChem API (fallback for basic properties)
+3. Demo mode (if all APIs fail)
 
-[ADMETlab 2.0 Website](https://admetmesh.scbdd.com/)
+**Note:** ADMETlab has been updated to version 3.0 with enhanced capabilities and API functionality.
+
+Results are for research purposes only.
+
+[ADMETlab 3.0 Website](https://admetlab3.scbdd.com/)
 """)
